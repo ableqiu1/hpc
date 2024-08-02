@@ -98,6 +98,13 @@ int pthread_setaffinity_np(pthread_t thread, size_t cpu_size,
 #define SOATTR __attribute__((visibility("default")))
 
 #define SENDSOURCE(node) ( sendbuf+(AGGR*nbuf[node]))
+
+// 计算缓冲区起始地址
+/*
+	sendbuf_intra: 这是指向缓冲区起始地址的全局指针。
+	AGGR_intra: 这是每个目标的聚合缓冲区大小（以字节为单位）：节点内
+	nbuf_intra[node]: 这是用于存储每个目标缓冲区索引的数组
+*/
 #define SENDSOURCE_intra(node) ( sendbuf_intra+(AGGR_intra*nbuf_intra[node]) )
 
 #define ushort unsigned short
@@ -118,7 +125,14 @@ volatile static int ack=0;
 
 volatile static int inbarrier=0;
 
-static void (*aml_handlers[256]) (int,void *,int); //pointers to user-provided AM handlers
+
+/*// 定义一个静态函数指针数组aml_handlers，数组大小为256，每个元素是一个函数指针，指向的函数接受三个参数：
+一个int类型，一个void指针和一个int类型。//pointers to user-provided AM handlers
+
+	- 该数组存储的函数用于处理消息
+*/
+static void (*aml_handlers[256]) (int,void *,int); 
+
 
 //internode comm (proc number X from each group)
 //intranode comm (all cores of one nodegroup)
@@ -149,43 +163,62 @@ volatile static int ack_intra=0;
 inline void aml_send_intra(void *srcaddr, int type, int length, int local ,int from);
 
 void aml_finalize(void);
+
+// 同步函数
 void aml_barrier(void);
 
+// 注册处理函数到指定的处理函数数组中
+// 参数:
+//   f - 指向处理函数的指针，该处理函数接受三个参数：一个整数，一个指向void的指针，和一个整数
+//   n - 处理函数在处理函数数组中的索引
 SOATTR void aml_register_handler(void(*f)(int,void*,int),int n) { 
-	aml_barrier(); 
-	aml_handlers[n]=f; 
-	aml_barrier();
+ aml_barrier(); 
+ aml_handlers[n]=f; 
+ aml_barrier();
 }
 
+// 节点间（不同物理设备间）   消息头
 struct __attribute__((__packed__)) hdr { //header of internode message
-	ushort sz;
-	char hndl;
-	char routing;
+	ushort sz;        // 消息体长度
+	char hndl;		// 消息处理函数编号
+	char routing;	// 消息目的节点的本地进程编号
 };
 //process internode messages
+/*
+解析节点间消息的消息头，
+根据消息的目的地决定是将消息传递给本地的处理函数还是转发到节点内（intranode）的其他进程
+*/
+// 处理从特定组发送的消息的函数
+// 参数:
+//   fromgroup - 消息来源的组ID
+//   length - 消息的总长度
+//   message - 指向消息数据的指针
 static void process(int fromgroup,int length ,char* message) {
-	int i = 0;
-	int from = PROC_FROM_GROUPLOCAL(fromgroup,mylocal);
-	while ( i < length ) {
-		void* m = message+i;
-		struct hdr *h = m;
-		int hsz=h->sz;
-		int hndl=h->hndl;
-		int destlocal = LOCAL_FROM_PROC(h->routing);
-		if(destlocal == mylocal)
-			aml_handlers[hndl](from,m+sizeof(struct hdr),hsz);
-		else
-			aml_send_intra(m+sizeof(struct hdr),hndl,hsz,destlocal,from);
-		i += hsz + sizeof(struct hdr);
-	}
+ int i = 0;
+ int from = PROC_FROM_GROUPLOCAL(fromgroup,mylocal);
+ while ( i < length ) {
+  void* m = message+i;
+  struct hdr *h = m;
+  int hsz=h->sz;
+  int hndl=h->hndl;
+  int destlocal = LOCAL_FROM_PROC(h->routing);
+  if(destlocal == mylocal)
+   aml_handlers[hndl](from,m+sizeof(struct hdr),hsz);
+  else
+   aml_send_intra(m+sizeof(struct hdr),hndl,hsz,destlocal,from);
+  i += hsz + sizeof(struct hdr);
+ }
 }
+
+
 struct __attribute__((__packed__)) hdri { //header of internode message
-	ushort routing;
-	ushort sz;
-	char hndl;
+	ushort routing;   // 消息目的地的组编号
+	ushort sz;		// 消息体长度
+	char hndl;		// 消息处理函数编号（hndl）
 };
 
 //process intranode messages
+// 节点内消息处理
 static void process_intra(int fromlocal,int length ,char* message) {
 	int i=0;
 	while ( i < length ) {
@@ -276,20 +309,32 @@ inline void flush_buffer_intra( int node ) {
 
 }
 
+// 此函数用于在同一组内的不同进程之间发送数据。
+// 参数:
+// src - 指向要发送数据的指针
+// type - 数据类型标识符
+// length - 要发送数据的长度
+// local - 本地进程标识符
+// from - 数据来源进程标识符
 inline void aml_send_intra(void *src, int type, int length, int local, int from) {
-	//send to _another_ process from same group
-	int nmax = AGGR_intra - sendsize_intra[local] - sizeof(struct hdri);
-	if ( nmax < length ) {
-		flush_buffer_intra(local);
-	}
-	char* dst = (SENDSOURCE_intra(local)+sendsize_intra[local]);
-	struct hdri *h=(void*)dst;
-	h->routing = GROUP_FROM_PROC(from);
-	h->sz=length;
-	h->hndl = type;
-	sendsize_intra[local] += length+sizeof(struct hdri);
-
-	memcpy(dst+sizeof(struct hdri),src,length);
+ //send to _another_ process from same group
+ // AGGR_intra: 聚合缓冲区大小
+ // 当前缓冲区剩余空间
+ int nmax = AGGR_intra - sendsize_intra[local] - sizeof(struct hdri);
+ if ( nmax < length ) {
+  // 如果空间不够就刷新缓冲区
+  flush_buffer_intra(local);
+ }
+ // 计算数据存储位置
+ char* dst = (SENDSOURCE_intra(local)+sendsize_intra[local]);
+ struct hdri *h=(void*)dst;
+ h->routing = GROUP_FROM_PROC(from);
+ h->sz=length;
+ h->hndl = type;
+ // 更新缓冲区占用大小
+ sendsize_intra[local] += length+sizeof(struct hdri);
+// 数据复制到缓冲区
+ memcpy(dst+sizeof(struct hdri),src,length);
 }
 
 SOATTR void aml_send(void *src, int type,int length, int node ) {

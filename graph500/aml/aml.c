@@ -82,11 +82,17 @@ int pthread_setaffinity_np(pthread_t thread, size_t cpu_size,
 #include <unistd.h>
 #include <mpi.h>
 
+// 节点数（核心进程在同一节点上形成一组）
 #define MAXGROUPS 65536		//number of nodes (core processes form a group on a same node)
+// 每个目标的聚合缓冲区大小（以字节为单位）：节点间
 #define AGGR (1024*32) //aggregation buffer size per dest in bytes : internode
+// 每个目标的聚合缓冲区大小（以字节为单位）：节点内
 #define AGGR_intra (1024*32) //aggregation buffer size per dest in bytes : intranode
+// 每个目标的聚合缓冲区数目
 #define NRECV 4 // number of preposted recvs internode
+// 每个目标的聚合缓冲区数目
 #define NRECV_intra 4 // number of preposted recvs intranode
+// 可用的节点间发送数量
 #define NSEND 4 // number of available sends internode
 #define NSEND_intra 4 // number of send intranode
 #define SOATTR __attribute__((visibility("default")))
@@ -145,7 +151,11 @@ inline void aml_send_intra(void *srcaddr, int type, int length, int local ,int f
 void aml_finalize(void);
 void aml_barrier(void);
 
-SOATTR void aml_register_handler(void(*f)(int,void*,int),int n) { aml_barrier(); aml_handlers[n]=f; aml_barrier(); }
+SOATTR void aml_register_handler(void(*f)(int,void*,int),int n) { 
+	aml_barrier(); 
+	aml_handlers[n]=f; 
+	aml_barrier();
+}
 
 struct __attribute__((__packed__)) hdr { //header of internode message
 	ushort sz;
